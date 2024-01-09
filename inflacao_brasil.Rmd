@@ -1,0 +1,193 @@
+---
+title: "Inflação"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+---
+
+```{r setup, include=FALSE}
+#BIBLIOTECAS
+library(flexdashboard)
+library(ggplot2)
+library(tidyverse)
+library(ggthemes)
+library(sidrar)
+library(GetBCBData)
+library(GetTDData)
+library(openxlsx)
+
+getwd()
+
+today_date <- format(Sys.Date(), "%d-%m-%Y")
+
+parametros <- list(ipca = "/t/1737/n1/all/v/2266/p/all/d/v2266%2013",
+                   ipca_nucleos = c("IPCA" = 433,
+                                    "IPCA_MS" = 4466,
+                                    "IPCA_DP" = 16122,
+                                    "IPCA_MA" = 11426 ,
+                                    "IPCA_EX0" = 11427,
+                                    "IPCA_EX1" = 16121,
+                                    "IPCA_EX2" = 27838,
+                                    "IPCA_EX3" = 27839),
+                   difusao = 21379,
+                   igpm = 189)
+
+
+
+acum_i <- function(data, n){
+  data_ma_n <- RcppRoll::roll_meanr(data, n)
+  data_lag_n <- dplyr::lag(data_ma_n, n)
+  data_acum_n = (((data_ma_n/data_lag_n)-1)*100)
+  return(data_acum_n)
+}
+
+acum_p <- function(data, n){
+  factor <- (1+(data/100))
+  prod <- RcppRoll::roll_prodr(factor, n = n)
+  final <- (prod-1)*100
+  return(final)
+}
+```
+
+```{r Datasets}
+#DATASETS
+
+#IPCA
+raw_ipca <- sidrar::get_sidra(api = parametros$ipca)
+
+ipca <- raw_ipca %>%
+  dplyr::mutate(date = ym("Mês (Código)")) %>%
+  dplyr::select(date,
+                "value" = Valor) %>%
+  dplyr::mutate(var_m = (value/ dplyr::lag(value, n = 1)-1)*100) %>%
+  dplyr::mutate(var_acum12m = acum_p(var_m, n =12)) %>%
+  dplyr::filter(date >= Sys.Date() %m-% months(60))
+
+
+#IPCA NUCLEOS
+ipca_nucleos <- GetBCBData::gbcbd_get_series(id = parametros$ipca_nucleos,
+                                             first.date = Sys.Date() %m-% months(72),
+                                             use.memoise = FALSE)
+
+ipca_nucleos <- ipca_nucleos %>%
+  dplyr::select(-id.num) %>%
+  tidyr::pivot_wider(id_cols = ref.date,
+                     names_from = "series.name",
+                     values_from = "value") %>%
+  dplyr::mutate(media_nucleos = (IPCA_MS+
+                                   IPCA_DP+
+                                   IPCA_MA+
+                                   IPCA_EX0+
+                                   IPCA_EX1+
+                                   IPCA_EX2+
+                                   IPCA_EX3)/7)
+
+
+ipca_nucleos_12m <- ipca_nucleos[,-1] %>%
+  stats::ts(start = c(year(min(ipca_nucleos$ref.date)),
+                      month(head(ipca_nucleos$ref.date, n=1)),
+                      freq = 12)) %>%
+  acum_p(n=12) %>%
+  dplyr::as_tibble() %>%
+  dplyr::mutate(date = ipca_nucleos$ref.date) %>%
+  dplyr::select(date, everything()) %>%
+  tidyr::drop_na() %>%
+  dplyr::mutate(media_nucleos = (IPCA_MS+
+                                   IPCA_DP+
+                                   IPCA_MA+
+                                   IPCA_EX0+
+                                   IPCA_EX1+
+                                   IPCA_EX2+
+                                   IPCA_EX3)/7)
+
+#Difusao
+raw_ipca_difusao <- GetBCBData::gbcbd_get_series(id = parametros$difusao,
+                                                 first.date = Sys.Date() %m-% months(60),
+                                                 use.memoise = FALSE) %>%
+  dplyr::select(-id.num)
+
+
+ipca_difusao <- raw_ipca_difusao %>%
+  dplyr::mutate(media_5y = mean(raw_ipca_difusao$value),
+                media_12m = mean(tail(raw_ipca_difusao$value, n = 12))) %>%
+  dplyr::select(-series.name)
+
+#IGP-M
+
+igpm_dataset <- GetBCBData::gbcbd_get_series(id = parametros$igpm,
+                                         first.date = Sys.Date() %m-% months(60),
+                                         use.memoise = FALSE) %>%
+  dplyr::select(-id.num,-series.name) %>%
+  dplyr::rename(igpm = value)
+```
+
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Chart A
+
+```{r}
+#IPCA_NUCLEOS
+dados_reorganizados <- ipca_nucleos_12m %>%
+  gather(key = "categoria_ipca", value = "valor", -date) %>%
+  mutate(isMediaNucleos = (categoria_ipca == 'media_nucleos')) %>%
+  mutate(isIPCA = (categoria_ipca == 'IPCA'))
+
+ggplot2::ggplot(dados_reorganizados) + 
+  ggplot2::aes(x = date, y = valor, color = categoria_ipca) +
+  ggplot2::labs(title = "IPCA + Núcleo IPCA",
+                subtitle = "Indíce de inflação geral + subjacente que exclui os itens voláteis",
+                x = "Data", 
+                y = "IPCA",
+                color = "Categoria IPCA",
+                caption = paste("Data de atualização:",today_date)) +
+  ggplot2::geom_line(aes(linetype = isMediaNucleos), size = 1.2, alpha = 0.8) +
+  ggplot2::geom_line(aes(linetype = isIPCA), size = 1.2, alpha = 0.8) +
+  ggthemes::theme_few() +
+  theme(axis.title = element_text()) +
+  scale_linetype_manual(values = c("dashed","solid"), guide ="none")
+```
+
+Column {data-width=350}
+-----------------------------------------------------------------------
+
+### Chart B
+
+```{r}
+#DIFUSAO
+dados_longos <- ipca_difusao %>%
+  pivot_longer(-ref.date, names_to = "tipo", values_to = "valor")
+
+ggplot2::ggplot(dados_longos) + 
+  ggplot2::aes(x = ref.date, y = valor, color  = tipo) +
+  ggplot2::labs(title = "Difusão",
+                subtitle = "O percentual de itens que estão aumentando de preço 
+                em relação ao seu total",
+                x = "Data", 
+                y = "Difusão",
+                color = "Tipo",
+                caption = paste("Data de atualização:",today_date)) +
+  ggplot2::geom_line(size = 1) +
+  ggthemes::theme_few() +
+  theme(axis.title = element_text())
+
+```
+
+### Chart C
+
+```{r}
+#IGP-M
+ggplot2::ggplot(igpm_dataset) + 
+  ggplot2::aes(x = ref.date, y = igpm) +
+  ggplot2::geom_line(size = 1, color = "#00008b") +
+  ggplot2::labs(title = "IGPM",
+                subtitle = "Índice de inflação considerando atacado e varejo",
+                x = "Data",
+                y = "IGPM",
+                caption = paste("Data de atualização:",today_date)) +
+  theme_few() +
+  theme(axis.title = element_text())
+```
+
